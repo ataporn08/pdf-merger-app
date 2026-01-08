@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Folder Merger - Portable</title>
+
+    <!-- Tailwind CSS Play CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            primary: '#3b82f6',
+                            secondary: '#8b5cf6',
+                            accent: '#10b981',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Styles -->
+    <style>
+        :root {
+            font-family: 'Outfit', sans-serif;
+            color-scheme: dark;
+        }
+
+        body {
+            margin: 0;
+            background: radial-gradient(circle at 50% 50%, #1a1a1a 0%, #0a0a0a 100%);
+            min-height: 100vh;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .glass {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border-width: 0;
+        }
+    </style>
+
+    <!-- Dependencies -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/framer-motion@10.16.4/dist/framer-motion.js"></script>
+</head>
+
+<body>
+    <div id="root" class="w-full"></div>
+
+    <script type="text/babel">
+        // Fix for Framer Motion global name in some CDN versions
+        window.FramerMotion = window.Motion || window.FramerMotion;
+        const { useState, useRef, useEffect } = React;
+        const { PDFDocument } = PDFLib;
+        const { motion, AnimatePresence } = window.FramerMotion;
+
+        // Custom Icon Component to wrap Lucide
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const iconRef = useRef(null);
+
+            useEffect(() => {
+                if (iconRef.current) {
+                    const icon = lucide.icons[name];
+                    if (icon) {
+                        // Clear previous content to prevent mounting/unmounting conflicts
+                        iconRef.current.innerHTML = '';
+                        const svg = lucide.createIcons({
+                            icons: { [name]: icon },
+                            nameAttr: 'data-lucide',
+                            attrs: {
+                                strokeWidth: 2,
+                                width: size,
+                                height: size,
+                                class: className
+                            }
+                        });
+                    }
+                }
+            }, [name, size, className]);
+
+            return <span ref={iconRef} style={{ display: 'inline-flex' }}></span>;
+        };
+
+        const App = () => {
+            const [folders, setFolders] = useState({
+                folderA: { files: [], path: '' },
+                folderB: { files: [], path: '' },
+                folderC: { files: [], path: '' },
+            });
+            const [outputFolder, setOutputFolder] = useState({ name: '', handle: null });
+            const [mergeAll, setMergeAll] = useState(true);
+            const [progress, setProgress] = useState(0);
+            const [status, setStatus] = useState('idle');
+            const [error, setError] = useState('');
+
+            const fileInputRefs = {
+                folderA: useRef(null),
+                folderB: useRef(null),
+                folderC: useRef(null),
+            };
+
+            const handleFileSelect = (key, event) => {
+                const files = Array.from(event.target.files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
+                if (files.length === 0) return;
+
+                const displayPath = files.length === 1
+                    ? files[0].name
+                    : `${files.length} files selected`;
+
+                setFolders(prev => ({
+                    ...prev,
+                    [key]: { files, path: displayPath }
+                }));
+            };
+
+            const handleOutputFolderSelect = async () => {
+                try {
+                    if (!('showDirectoryPicker' in window)) {
+                        throw new Error('Your browser does not support folder selection for saving. Please use a modern browser like Chrome or Edge.');
+                    }
+                    const handle = await window.showDirectoryPicker();
+                    setOutputFolder({ name: handle.name, handle: handle });
+                } catch (err) {
+                    if (err.name !== 'AbortError') {
+                        setError(err.message);
+                    }
+                }
+            };
+
+            const triggerDownload = (blob, fileName) => {
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = fileName;
+                link.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const mergePDFs = async () => {
+                try {
+                    setStatus('processing');
+                    setProgress(10);
+                    setError('');
+
+                    const mergedPdf = await PDFDocument.create();
+                    const maxSets = Math.max(
+                        folders.folderA.files.length,
+                        folders.folderB.files.length,
+                        folders.folderC.files.length
+                    );
+
+                    if (maxSets === 0) {
+                        throw new Error('No PDF files selected.');
+                    }
+
+                    for (let i = 0; i < maxSets; i++) {
+                        // 1. Process File A (PMA) - Page 1
+                        if (folders.folderA.files[i]) {
+                            const pdfA = await PDFDocument.load(await folders.folderA.files[i].arrayBuffer());
+                            const pagesA = await mergedPdf.copyPages(pdfA, pdfA.getPageIndices());
+                            if (pagesA.length > 0) mergedPdf.addPage(pagesA[0]);
+
+                            // 2. Q1 (File B)
+                            if (folders.folderB.files[i]) {
+                                const pdfB = await PDFDocument.load(await folders.folderB.files[i].arrayBuffer());
+                                const pagesB = await mergedPdf.copyPages(pdfB, pdfB.getPageIndices());
+                                pagesB.forEach(p => mergedPdf.addPage(p));
+                            }
+
+                            // 3. PMA Page 2
+                            if (pagesA.length > 1) mergedPdf.addPage(pagesA[1]);
+
+                            // 4. Q2 (File C)
+                            if (folders.folderC.files[i]) {
+                                const pdfC = await PDFDocument.load(await folders.folderC.files[i].arrayBuffer());
+                                const pagesC = await mergedPdf.copyPages(pdfC, pdfC.getPageIndices());
+                                pagesC.forEach(p => mergedPdf.addPage(p));
+                            }
+                        } else {
+                            if (folders.folderB.files[i]) {
+                                const pdfB = await PDFDocument.load(await folders.folderB.files[i].arrayBuffer());
+                                const pagesB = await mergedPdf.copyPages(pdfB, pdfB.getPageIndices());
+                                pagesB.forEach(p => mergedPdf.addPage(p));
+                            }
+                            if (folders.folderC.files[i]) {
+                                const pdfC = await PDFDocument.load(await folders.folderC.files[i].arrayBuffer());
+                                const pagesC = await mergedPdf.copyPages(pdfC, pdfC.getPageIndices());
+                                pagesC.forEach(p => mergedPdf.addPage(p));
+                            }
+                        }
+                        setProgress(Math.round(10 + ((i + 1) / maxSets) * 80));
+                    }
+
+                    const pdfBytes = await mergedPdf.save();
+                    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+
+                    let prefix = `Merged_PDF_${new Date().toISOString().slice(0, 10)}`;
+                    const firstFile = folders.folderA.files[0] || folders.folderB.files[0] || folders.folderC.files[0];
+                    if (firstFile) {
+                        prefix = firstFile.name.replace(/\.[^/.]+$/, "")
+                            .replace("PMA Report_", "")
+                            .replace(" - PMA Report", "");
+                    }
+                    const fileName = `${prefix} - Merged.pdf`;
+
+                    if (outputFolder.handle) {
+                        try {
+                            const fileHandle = await outputFolder.handle.getFileHandle(fileName, { create: true });
+                            const writable = await fileHandle.createWritable();
+                            await writable.write(blob);
+                            await writable.close();
+                        } catch (err) {
+                            console.error('Failed to save to folder:', err);
+                            triggerDownload(blob, fileName);
+                        }
+                    } else {
+                        triggerDownload(blob, fileName);
+                    }
+
+                    setProgress(100);
+                    setStatus('completed');
+                } catch (err) {
+                    console.error(err);
+                    setError(err.message || 'An error occurred during merging.');
+                    setStatus('error');
+                }
+            };
+
+            const handleReset = () => {
+                setFolders({
+                    folderA: { files: [], path: '' },
+                    folderB: { files: [], path: '' },
+                    folderC: { files: [], path: '' },
+                });
+                setOutputFolder({ name: '', handle: null });
+                setMergeAll(true);
+                setProgress(0);
+                setStatus('idle');
+                setError('');
+                Object.values(fileInputRefs).forEach(ref => {
+                    if (ref.current) ref.current.value = '';
+                });
+            };
+
+            return (
+                <div className="min-h-screen w-full flex items-center justify-center p-6 lg:p-12 relative overflow-hidden">
+                    {/* Background blobs */}
+                    <div className="fixed top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-500/10 blur-[120px] rounded-full -z-10 animate-pulse" />
+                    <div className="fixed bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-500/10 blur-[120px] rounded-full -z-10 animate-pulse" />
+
+                    <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="w-full max-w-2xl glass rounded-[2.5rem] p-8 lg:p-10 shadow-2xl relative overflow-hidden"
+                    >
+                        {/* Header */}
+                        <div className="text-center mb-12">
+                            <div className="inline-flex items-center justify-center w-24 h-24 rounded-[2rem] bg-blue-500/10 mb-6 p-2">
+                                <img
+                                    src="public/assets/logo.png"
+                                    alt="Logo"
+                                    className="w-full h-full object-contain drop-shadow-[0_0_20px_rgba(239,68,68,0.4)]"
+                                />
+                            </div>
+                            <h1 className="text-4xl lg:text-5xl font-bold tracking-tight mb-3 bg-gradient-to-r from-white via-white/90 to-white/40 bg-clip-text text-transparent">
+                                PDF Folder Merger
+                            </h1>
+                            <p className="text-red-400/80 font-medium text-sm italic">
+                                Standalone Portable Version
+                            </p>
+                        </div>
+
+                        {/* Action List */}
+                        <div className="space-y-6 mb-10">
+                            {[
+                                { id: 'folderA', label: 'Select PDF File(s) for File A (PMA Report, 2 pages)', color: 'blue' },
+                                { id: 'folderB', label: 'Select PDF File(s) for File B (Log ไตรมาสที่ 1 or 3, 3 pages)', color: 'purple' },
+                                { id: 'folderC', label: 'Select PDF File(s) for File C (Log ไตรมาสที่ 2 or 4, 3 pages)', color: 'emerald' },
+                            ].map((item) => (
+                                <div key={item.id} className="relative group">
+                                    <p className="text-sm text-gray-400 mb-3 ml-1 font-medium">{item.label}</p>
+                                    <div className="flex gap-4">
+                                        <div className="flex-1 glass bg-white/5 rounded-2xl px-5 py-4 flex items-center border border-white/5 group-hover:border-white/20 transition-all duration-500 truncate">
+                                            <span className={`text-sm transition-colors ${folders[item.id].path ? "text-gray-100" : "text-gray-500"}`}>
+                                                {folders[item.id].path || "No files selected..."}
+                                            </span>
+                                            {folders[item.id].files.length > 0 && (
+                                                <span className="ml-auto bg-white/10 px-3 py-1 rounded-full text-[10px] uppercase font-bold text-blue-400 tracking-wider">
+                                                    {folders[item.id].files.length} PDFs
+                                                </span>
+                                            )}
+                                        </div>
+                                        <button
+                                            onClick={() => fileInputRefs[item.id].current.click()}
+                                            className="flex items-center gap-2 px-6 py-4 rounded-2xl bg-white/5 hover:bg-white/10 transition-all text-sm font-bold border border-white/10 active:scale-95 shadow-lg"
+                                        >
+                                            <Icon name="FolderOpen" size={20} />
+                                            Browse
+                                        </button>
+                                        <input
+                                            type="file"
+                                            ref={fileInputRefs[item.id]}
+                                            className="sr-only"
+                                            onChange={(e) => handleFileSelect(item.id, e)}
+                                            accept=".pdf"
+                                            multiple
+                                        />
+                                    </div>
+                                </div>
+                            ))}
+
+                            {/* Output Folder Selection */}
+                            <div className="relative group pt-8 border-t border-white/10">
+                                <p className="text-sm text-blue-400 font-bold mb-3 ml-1 flex items-center gap-2">
+                                    <Icon name="Download" size={18} />
+                                    Select Save Folder (ที่เก็บไฟล์)
+                                </p>
+                                <div className="flex gap-4">
+                                    <div className="flex-1 glass bg-white/5 rounded-2xl px-5 py-4 flex items-center border border-white/5 group-hover:border-white/20 transition-all duration-500 truncate">
+                                        <span className={`text-sm transition-colors ${outputFolder.name ? "text-gray-100" : "text-gray-500"}`}>
+                                            {outputFolder.name || "Default: Downloads folder"}
+                                        </span>
+                                    </div>
+                                    <button
+                                        onClick={handleOutputFolderSelect}
+                                        className="flex items-center gap-2 px-6 py-4 rounded-2xl bg-blue-500/10 hover:bg-blue-500/20 transition-all text-sm font-bold border border-blue-500/20 active:scale-95 text-blue-400 shadow-xl shadow-blue-500/5"
+                                    >
+                                        <Icon name="FolderOpen" size={20} />
+                                        Browse Folder
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Options */}
+                        <div className="flex items-center gap-3 mb-12 px-2">
+                            <input
+                                id="merge-all-check"
+                                type="checkbox"
+                                className="sr-only"
+                                checked={mergeAll}
+                                onChange={() => setMergeAll(prev => !prev)}
+                            />
+                            <label htmlFor="merge-all-check" className="flex items-center gap-4 cursor-pointer group">
+                                <div className="relative">
+                                    <div className={`w-6 h-6 border-2 rounded-lg transition-all duration-300 flex items-center justify-center ${mergeAll ? "bg-blue-500 border-blue-500" : "border-white/20 group-hover:border-white/40"}`}>
+                                        {mergeAll && <Icon name="Check" size={16} className="text-white" />}
+                                    </div>
+                                </div>
+                                <span className="text-[15px] text-gray-300 font-medium group-hover:text-white transition-colors">Merge all group PDFs into a single file</span>
+                            </label>
+                        </div>
+
+                        {/* Progress & Actions */}
+                        <div className="space-y-8">
+                            <AnimatePresence>
+                                {status !== 'idle' && (
+                                    <motion.div
+                                        initial={{ opacity: 0, height: 0 }}
+                                        animate={{ opacity: 1, height: 'auto' }}
+                                        exit={{ opacity: 0, height: 0 }}
+                                        className="space-y-3"
+                                    >
+                                        <div className="flex justify-between text-[11px] font-bold text-gray-400 tracking-widest uppercase mb-1">
+                                            <span>{status === 'processing' ? 'Processing...' : status === 'completed' ? 'Tasks Success' : 'Error Detected'}</span>
+                                            <span>{progress}%</span>
+                                        </div>
+                                        <div className="h-3 w-full bg-white/5 rounded-full overflow-hidden border border-white/10 shadow-inner">
+                                            <motion.div
+                                                initial={{ width: 0 }}
+                                                animate={{ width: `${progress}%` }}
+                                                className={`h-full rounded-full transition-all duration-700 ${status === 'error' ? "bg-red-500" : "bg-gradient-to-r from-blue-500 to-purple-600"}`}
+                                            />
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+
+                            {error && (
+                                <div className="flex items-start gap-3 p-5 bg-red-500/10 border border-red-500/20 rounded-[1.5rem] text-red-400 text-sm font-medium animate-shake">
+                                    <Icon name="AlertCircle" size={20} className="shrink-0" />
+                                    <p>{error}</p>
+                                </div>
+                            )}
+
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={handleReset}
+                                    disabled={status === 'processing'}
+                                    className="flex-1 py-4 lg:py-5 rounded-[1.5rem] flex items-center justify-center gap-3 font-bold text-lg transition-all bg-white/5 hover:bg-white/10 active:scale-95 border border-white/10 text-gray-300"
+                                >
+                                    <Icon name="RotateCcw" size={24} />
+                                    Reset
+                                </button>
+                                <button
+                                    onClick={mergePDFs}
+                                    disabled={status === 'processing' || (!folders.folderA.files.length && !folders.folderB.files.length && !folders.folderC.files.length)}
+                                    className={`flex-[2] py-4 lg:py-5 rounded-[1.5rem] flex items-center justify-center gap-3 font-bold text-lg transition-all shadow-2xl ${status === 'processing'
+                                        ? "bg-blue-500/50 cursor-not-allowed opacity-70"
+                                        : "bg-blue-500 hover:bg-blue-600 active:scale-95 shadow-blue-500/20"
+                                        }`}
+                                >
+                                    {status === 'processing' ? (
+                                        <>
+                                            <Icon name="Loader2" size={24} className="animate-spin" />
+                                            Merging...
+                                        </>
+                                    ) : status === 'completed' ? (
+                                        <>
+                                            <Icon name="CheckCircle2" size={24} />
+                                            Merge Again
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Icon name="Merge" size={24} />
+                                            Merge PDF
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Footer decoration */}
+                        <div className="mt-12 pt-8 border-t border-white/5 flex justify-center text-[10px] text-gray-500 font-bold tracking-[0.3em] uppercase">
+                            Client-Side Local Processing
+                        </div>
+                    </motion.div >
+                </div >
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
